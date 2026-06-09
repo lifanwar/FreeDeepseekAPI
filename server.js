@@ -166,12 +166,27 @@ function selectAccountForSession(session) {
     session.accountId = account.id;
     return account;
 }
-function markAccountFailure(account, status, reason = '') {
+// Parse a Retry-After header value into a cooldown duration in ms, or null if
+// absent/unparseable. Supports both forms: delta-seconds (e.g. "120") and an
+// HTTP-date (e.g. "Wed, 21 Oct 2025 07:28:00 GMT"). Clamped to >= 1s.
+function parseRetryAfterMs(retryAfterRaw) {
+    if (!retryAfterRaw) return null;
+    const raw = String(retryAfterRaw).trim();
+    if (/^\d+$/.test(raw)) return Math.max(1000, Number(raw) * 1000);
+    const t = Date.parse(raw);
+    if (!Number.isNaN(t)) return Math.max(1000, t - Date.now());
+    return null;
+}
+function markAccountFailure(account, status, reason = '', retryAfterRaw = null) {
     if (!account) return;
     account.failures++;
     if ([401, 403, 429].includes(Number(status))) {
-        account.cooldownUntil = Date.now() + DEFAULT_ACCOUNT_COOLDOWN_MS;
-        console.log(`[account:${account.id}] cooldown for ${Math.round(DEFAULT_ACCOUNT_COOLDOWN_MS / 1000)}s after HTTP ${status}${reason ? ` (${reason})` : ''}`);
+        // On 429, honor a valid Retry-After header (seconds or HTTP-date) when present;
+        // otherwise fall back to the fixed env-configured cooldown.
+        const retryMs = Number(status) === 429 ? parseRetryAfterMs(retryAfterRaw) : null;
+        const cooldownMs = retryMs != null ? retryMs : DEFAULT_ACCOUNT_COOLDOWN_MS;
+        account.cooldownUntil = Date.now() + cooldownMs;
+        console.log(`[account:${account.id}] cooldown for ${Math.round(cooldownMs / 1000)}s after HTTP ${status}${reason ? ` (${reason})` : ''}${retryMs != null ? ' (Retry-After)' : ''}`);
     }
 }
 async function readDeepSeekJsonResponse(resp, label, account) {
@@ -420,7 +435,8 @@ async function askDeepSeekStream(prompt, agentId, model = 'deepseek-default') {
 
     // If session expired, reset and retry once
     if (resp.status !== 200) {
-        markAccountFailure(account, resp.status, 'completion');
+        // Pass Retry-After so a 429 honors the server-requested cooldown (#16).
+        markAccountFailure(account, resp.status, 'completion', resp.headers.get('retry-after'));
         const errText = await resp.text();
         console.log(`${agentTag} Session error (${resp.status}): ${errText.substring(0, 100)}`);
         if (resp.status === 400 || resp.status === 404 || resp.status === 500) {
@@ -461,11 +477,11 @@ async function askDeepSeekStream(prompt, agentId, model = 'deepseek-default') {
                     action: null, preempt: false,
                 })
             });
-            return { resp: resp2, agentId };
+            return { resp: resp2, agentId, account };
         }
     }
 
-    return { resp, agentId };
+    return { resp, agentId, account };
 }
 
 // === Tool Calling Support ===
@@ -1347,7 +1363,14 @@ const server = http.createServer(async (req, res) => {
                 continuationRounds++;
                 console.log(`${agentTag} Response ${fullContent.length} chars (finish=${finishReason}). Auto-continuing (${continuationRounds}/${MAX_CONTINUATION})...`);
                 await new Promise(r => setTimeout(r, 500));
-                const { resp: contResp } = await askDeepSeekStream('continue', agentId, requestedModel);
+                const contBeforeId = session.accountId;
+                const { resp: contResp, account: contAccount } = await askDeepSeekStream('continue', agentId, requestedModel);
+                // If rotation moved us to a different account, its chat_session has no
+                // prior context — "continue" would return irrelevant text. Abort (#20).
+                if (contAccount && contBeforeId && contAccount.id !== contBeforeId) {
+                    console.log(`${agentTag} continuation rotated to ${contAccount.id} ≠ ${contBeforeId} — skipping (foreign session)`);
+                    break;
+                }
                 const contResult = await readDeepSeekResponse(contResp.body);
                 const contContent = contResult && contResult.content ? sanitizeContent(contResult.content) : '';
                 const contReasoning = contResult && contResult.reasoningContent ? sanitizeContent(contResult.reasoningContent) : '';
