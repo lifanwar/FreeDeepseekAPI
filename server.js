@@ -1231,6 +1231,40 @@ const server = http.createServer(async (req, res) => {
                 ? String(requestedSession)
                 : ((remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1') ? 'dev-agent' : remoteAddr);
             const agentTag = `[${agentId}]`;
+
+            // "/new" command: if the latest user message is exactly "/new" (whitespace-insensitive),
+            // reset this agent's DeepSeek session/history instead of forwarding anything to DeepSeek.
+            const lastUserMessage = [...messages].reverse().find(m => m && m.role === 'user');
+            const lastUserText = lastUserMessage && typeof lastUserMessage.content === 'string'
+                ? lastUserMessage.content.trim()
+                : '';
+            if (lastUserText === '/new') {
+                const existing = sessions.get(agentId);
+                const historyCount = existing ? existing.history.length : 0;
+                sessions.set(agentId, createSession());
+                console.log(`${agentTag} /new received — session reset (history cleared: ${historyCount})`);
+                const confirmation = buildTextResponse('Started a new chat. Session and history have been reset.', '/new', requestedModel);
+                if (stream) {
+                    if (apiMode === 'anthropic') {
+                        sendAnthropicStream(res, confirmation);
+                    } else if (apiMode === 'responses') {
+                        sendResponsesStream(res, confirmation);
+                    } else {
+                        sendOpenAIStream(res, confirmation);
+                    }
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    if (apiMode === 'anthropic') {
+                        res.end(JSON.stringify(toAnthropicResponse(confirmation)));
+                    } else if (apiMode === 'responses') {
+                        res.end(JSON.stringify(toResponsesResponse(confirmation)));
+                    } else {
+                        res.end(JSON.stringify(confirmation));
+                    }
+                }
+                return;
+            }
+
             const { prompt, systemPrompt } = formatMessages(messages, tools);
 
             const session = getOrCreateAgentSession(agentId);
