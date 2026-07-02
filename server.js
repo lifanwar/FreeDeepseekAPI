@@ -17,6 +17,49 @@ const path = require('path');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
 
+const PORT = Number(process.env.PORT || 9655);
+const HOST = process.env.HOST || '0.0.0.0';
+const crypto = require('crypto');
+
+const OPENAI_COMPAT_API_KEY = String(process.env.OPENAI_COMPAT_API_KEY || '').trim();
+
+function timingSafeEqualString(a, b) {
+  const aBuf = Buffer.from(String(a || ''));
+  const bBuf = Buffer.from(String(b || ''));
+
+  if (aBuf.length !== bBuf.length) return false;
+
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function getBearerToken(req) {
+  const authorization = String(req.headers.authorization || '');
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  return match ? match[1].trim() : null;
+}
+
+function isClientAuthorized(req) {
+  if (!OPENAI_COMPAT_API_KEY) return false;
+
+  const token = getBearerToken(req);
+
+  if (!token) return false;
+
+  return timingSafeEqualString(token, OPENAI_COMPAT_API_KEY);
+}
+
+function sendUnauthorized(res) {
+  res.writeHead(401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    error: {
+      message: 'Unauthorized. Missing or invalid Authorization Bearer token.',
+      type: 'invalid_api_key',
+      code: 'invalid_api_key'
+    }
+  }));
+}
+
 const SERVER_HOST = os.hostname();  // Dynamic hostname detection
 const SERVER_PUBLIC_IP = (() => {
     try {
@@ -1128,6 +1171,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+    // apikey validation
+    const isPublicHealthCheck =
+      req.method === 'GET' &&
+      (url.pathname === '/' || url.pathname === '/health');
+
+    if (!isPublicHealthCheck && !isClientAuthorized(req)) {
+      sendUnauthorized(res);
+      return;
+    }
 
     // Health check
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
