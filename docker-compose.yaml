@@ -1,0 +1,17 @@
+services:
+  free-deepseek-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: free-deepseek-api:latest
+    container_name: free-deepseek-api
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    expose:
+      - "${PORT:-9655}"
+
+    volumes:
+      - ./deepseek-auth.json:/app/accounts/deepseek-auth.json:ro
