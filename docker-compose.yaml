@@ -13,5 +13,4 @@ services:
     volumes:
       - ./deepseek-auth.json:/app/accounts/deepseek-auth.json:ro
     mem_limit: 200m
-    memswap_limit: 50m
     cpus: "0.50"
