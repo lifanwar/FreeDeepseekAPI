@@ -10,6 +10,8 @@
  * Listens on 0.0.0.0:9655
  */
 
+require('dotenv').config();
+
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
@@ -17,8 +19,6 @@ const path = require('path');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
 
-const PORT = Number(process.env.PORT || 9655);
-const HOST = process.env.HOST || '0.0.0.0';
 const crypto = require('crypto');
 
 const OPENAI_COMPAT_API_KEY = String(process.env.OPENAI_COMPAT_API_KEY || '').trim();
