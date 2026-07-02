@@ -8,7 +8,7 @@
     "free-deepseek-client": "./client.js"
   },
   "scripts": {
-    "start": "node server.js",
+    "start": "node --env-file=.env server.js",
     "auth": "node scripts/auth.js",
     "auth:import": "node scripts/auth_import.js",
     "doctor": "node scripts/doctor.js",
@@ -31,8 +31,5 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/ForgetMeAI/FreeDeepseekAPI.git"
-  },
-  "dependencies": {
-    "dotenv": "^17.4.2"
   }
 }
