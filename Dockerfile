@@ -1,12 +1,24 @@
-FROM node:20-bookworm-slim
+FROM node:20-bookworm-slim AS build
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 
-COPY --chown=node:node . .
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
-RUN mkdir -p /app/accounts && chown -R node:node /app
+COPY . .
+RUN mkdir -p /app/accounts
+
+
+FROM node:20-bookworm-slim AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=build /app /app
+RUN chown -R node:node /app
 
 USER node
 
