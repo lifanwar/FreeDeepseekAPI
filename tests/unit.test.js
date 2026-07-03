@@ -180,3 +180,21 @@ test('session reuse does not trigger eviction when under capacity', () => {
     }
   }
 });
+
+test('parseToolCall ignores non-json fenced blocks (bash, javascript)', () => {
+  const { parseToolCall } = serverInternals;
+
+  // Should NOT parse bash fence as tool call
+  assert.equal(parseToolCall('```bash\nread_file server.js\n```'), null);
+
+  // Should NOT parse javascript fence as tool call
+  assert.equal(parseToolCall('```javascript\nconst x = 1;\n```'), null);
+
+  // Should NOT parse fence without label as tool call
+  assert.equal(parseToolCall('```\n{"name":"test"}\n```'), null);
+
+  // Should parse ```json fence
+  const result = parseToolCall('```json\n{"name":"read_file","arguments":{"path":"test"}}\n```');
+  assert.ok(result);
+  assert.equal(result.name, 'read_file');
+});

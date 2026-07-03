@@ -645,6 +645,9 @@ function coerceToolCallObject(obj) {
     const name = fn.name || candidate.name || obj.name;
     let args = fn.arguments ?? candidate.arguments ?? candidate.input ?? obj.arguments ?? obj.input ?? {};
     if (!name || typeof name !== 'string') return null;
+    // Must have arguments or input to be a valid tool call
+    const hasExplicitArgs = candidate.arguments !== undefined || candidate.input !== undefined || obj.arguments !== undefined || obj.input !== undefined;
+    if (!hasExplicitArgs) return null;
     if (typeof args === 'string') {
         try { args = JSON.parse(args); } catch (e) { args = { raw: args }; }
     }
@@ -679,7 +682,7 @@ function parseToolCall(text) {
     }
 
     // Fenced JSON blocks.
-    const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+    const fenceRe = /```json\s*([\s\S]*?)```/gi;
     let fence;
     while ((fence = fenceRe.exec(text)) !== null) {
         const tc = parseJsonToolCandidate(fence[1].trim(), 'fenced');
@@ -712,9 +715,12 @@ function parseToolCall(text) {
 
     // First balanced JSON object in the whole response. Supports:
     // {"tool_call":{"name":"...","arguments":{...}}}, {"name":"...","arguments":{...}}, etc.
-    for (let i = 0; i < text.length; i++) {
-        if (text[i] !== '{') continue;
-        const rawJson = extractBalancedJsonAt(text, i);
+    // Strip all fenced blocks (any label) before inline parsing to avoid
+    // false positives from non-json fences like ```bash, ```javascript, etc.
+    const textWithoutFences = text.replace(/```[\s\S]*?```/g, '');
+    for (let i = 0; i < textWithoutFences.length; i++) {
+        if (textWithoutFences[i] !== '{') continue;
+        const rawJson = extractBalancedJsonAt(textWithoutFences, i);
         if (!rawJson) continue;
         const tc = parseJsonToolCandidate(rawJson, 'inline');
         if (tc) return tc;
@@ -1684,5 +1690,6 @@ module.exports = {
         applyResponsePatchOperations,
         createSession,
         getOrCreateAgentSession,
+        parseToolCall,
     },
 };
