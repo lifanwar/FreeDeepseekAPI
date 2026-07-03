@@ -10,6 +10,7 @@
  * Listens on 0.0.0.0:9655
  */
 
+require('dotenv').config();
 
 const http = require('http');
 const fs = require('fs');
