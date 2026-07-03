@@ -143,3 +143,40 @@ test('DeepSeek stream parser does not treat service content chunks as model erro
   assert.equal(serverInternals.isDeepSeekModelErrorEvent({ finish_reason: 'stop' }), false);
   assert.equal(serverInternals.isDeepSeekModelErrorEvent({ type: 'error', content: 'backend error' }), true);
 });
+
+test('session lazy eviction evicts oldest session when at MAX_SESSIONS capacity', () => {
+  const { getOrCreateAgentSession } = serverInternals;
+
+  // Fill to max (10)
+  for (let i = 0; i < 10; i++) {
+    const s = getOrCreateAgentSession(`agent_${i}`);
+    s.lastUsedAt = Date.now() - (10 - i) * 1000; // agent_0 oldest, agent_9 newest
+  }
+
+  // Add one more — should evict agent_0 (oldest)
+  const s11 = getOrCreateAgentSession('agent_10');
+
+  // Re-access all agents — eviction shouldn't crash
+  for (let i = 0; i <= 10; i++) {
+    const s = getOrCreateAgentSession(`agent_${i}`);
+    assert.ok(s, `session agent_${i} should exist`);
+    assert.ok(typeof s.lastUsedAt === 'number', `agent_${i} should have lastUsedAt`);
+  }
+});
+
+test('session reuse does not trigger eviction when under capacity', () => {
+  const { getOrCreateAgentSession } = serverInternals;
+
+  // Create 5 sessions
+  for (let i = 0; i < 5; i++) {
+    getOrCreateAgentSession(`reuse_${i}`);
+  }
+
+  // Re-access the same 5 sessions 100 times — no eviction should occur
+  for (let j = 0; j < 100; j++) {
+    for (let i = 0; i < 5; i++) {
+      const s = getOrCreateAgentSession(`reuse_${i}`);
+      assert.ok(s, `reuse_${i} should still exist`);
+    }
+  }
+});

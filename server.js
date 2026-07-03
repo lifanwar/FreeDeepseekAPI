@@ -101,6 +101,7 @@ const MAX_HISTORY_LENGTH = 15;
 const MAX_HISTORY_CHARS = 10000;
 const MAX_MESSAGE_DEPTH = 100;  // auto-reset after this many messages
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
+const MAX_SESSIONS = 10;
 
 // === DeepSeek Web API Config — loaded from external config file ===
 const DS_CONFIG_PATH = process.env.DEEPSEEK_AUTH_PATH || path.join(__dirname, 'deepseek-auth.json');
@@ -257,11 +258,24 @@ function createSession() {
         messageCount: 0,
         accountId: null,
         history: [],
+        lastUsedAt: Date.now(),
     };
 }
 
 function getOrCreateAgentSession(agentId) {
     if (!sessions.has(agentId)) {
+        // Lazy eviction: remove oldest session if at max capacity
+        if (sessions.size >= MAX_SESSIONS) {
+            let oldestId = null;
+            let oldestTime = Infinity;
+            for (const [id, s] of sessions) {
+                if (s.lastUsedAt < oldestTime) {
+                    oldestTime = s.lastUsedAt;
+                    oldestId = id;
+                }
+            }
+            if (oldestId) sessions.delete(oldestId);
+        }
         sessions.set(agentId, createSession());
     }
     return sessions.get(agentId);
@@ -1668,5 +1682,7 @@ module.exports = {
         isDeepSeekModelErrorEvent,
         rebuildFragmentText,
         applyResponsePatchOperations,
+        createSession,
+        getOrCreateAgentSession,
     },
 };
