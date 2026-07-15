@@ -19,7 +19,7 @@ const path = require('path');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
 
-const crypto = require('crypto');
+const crypto = require('crypto'); const teraxProvider = require('./provider/terax');
 
 const OPENAI_COMPAT_API_KEY = String(process.env.OPENAI_COMPAT_API_KEY || '').trim();
 
@@ -391,7 +391,7 @@ const MODEL_CONFIGS = {
     },
 };
 
-const SUPPORTED_MODEL_IDS = Object.keys(MODEL_CONFIGS).filter(id => MODEL_CONFIGS[id].supported);
+teraxProvider.registerModel(MODEL_CONFIGS); const SUPPORTED_MODEL_IDS = Object.keys(MODEL_CONFIGS).filter(id => MODEL_CONFIGS[id].supported);
 const ALL_MODEL_CAPABILITIES = Object.fromEntries(Object.entries(MODEL_CONFIGS).map(([id, cfg]) => [id, {
     id,
     real_model: cfg.real_model,
@@ -1141,14 +1141,16 @@ function extractScreenshotPaths(messages) {
     return paths;
 }
 
-function formatMessages(messages, tools) {
+function formatMessages(messages, tools, model, toolChoice) {
     let systemPrompt = '';
     for (const msg of messages) {
         if (msg.role === 'system' && msg.content) {
             systemPrompt += msg.content + '\n';
         }
     }
-    systemPrompt += formatToolDefinitions(tools);
+    systemPrompt += teraxProvider.isTeraxModel(model)
+        ? teraxProvider.formatToolDefinitions(tools, toolChoice)
+        : formatToolDefinitions(tools);
 
     // Build full conversation history for DeepSeek's context
     let conversation = '';
@@ -1332,7 +1334,7 @@ const server = http.createServer(async (req, res) => {
                 return;
             }
 
-            const { prompt, systemPrompt } = formatMessages(messages, tools);
+            const { prompt, systemPrompt } = formatMessages(messages, tools, requestedModel, params.tool_choice);
 
             const session = getOrCreateAgentSession(agentId);
 
@@ -1527,22 +1529,37 @@ const server = http.createServer(async (req, res) => {
                 }
             }
 
-            let toolCall = parseToolCall(fullContent);
+            const inspectRequestedToolCall = (text) => {
+        if (teraxProvider.isTeraxModel(requestedModel)) {
+          return teraxProvider.inspectToolCall(text, tools, params.tool_choice);
+        }
+        return { found: false, call: parseToolCall(text), error: null };
+      };
+      let toolInspection = inspectRequestedToolCall(fullContent);
+      let toolCall = toolInspection.call;
             
             // Retry if TOOL_CALL was found but JSON was truncated/invalid
-            if (!toolCall && /TOOL_CALL:\s*\w/i.test(fullContent)) {
+            const shouldRepairToolCall = teraxProvider.isTeraxModel(requestedModel)
+        ? teraxProvider.shouldRepair(params.tool_choice, toolInspection)
+        : (!toolCall && /TOOL_CALL:\s*\w/i.test(fullContent));
+      if (shouldRepairToolCall) {
                 console.log(`${agentTag} TOOL_CALL detected but JSON invalid/truncated (${fullContent.length} chars). Retrying with stricter prompt...`);
                 session.id = null;
                 session.parentMessageId = null;
                 session.createdAt = null;
                 session.messageCount = 0;
                 await new Promise(r => setTimeout(r, 1000));
-                const strictPrompt = fullPrompt + '\n\n[STRICT INSTRUCTION] Your previous response had a TOOL_CALL but the arguments were too long and got cut off. Keep the arguments SHORT — no large file contents. Just use a minimal example or reference the file by name. Output ONLY: TOOL_CALL: <function>\narguments: <short JSON>';
-                const { resp: retryResp2 } = await askDeepSeekStream(strictPrompt, agentId, requestedModel);
+                const strictPrompt = fullPrompt + '\n\n' + (
+        teraxProvider.isTeraxModel(requestedModel)
+          ? teraxProvider.buildRepairInstruction(toolInspection.error, tools, params.tool_choice)
+          : '[STRICT INSTRUCTION] The previous TOOL_CALL was malformed. Output ONLY: TOOL_CALL: <function_name>\narguments: <short JSON object>'
+      );
+      const { resp: retryResp2 } = await askDeepSeekStream(strictPrompt, agentId, requestedModel);
                 const retryResult2 = await readDeepSeekResponse(retryResp2.body);
                 const retryContent2 = retryResult2 && retryResult2.content ? sanitizeContent(retryResult2.content) : '';
                 if (retryContent2 && retryContent2.trim()) {
-                    const retryTc = parseToolCall(retryContent2);
+                    toolInspection = inspectRequestedToolCall(retryContent2);
+        const retryTc = toolInspection.call;
                     if (retryTc) {
                         console.log(`${agentTag} Retry with strict prompt succeeded: ${retryTc.name}`);
                         fullContent = retryContent2;
