@@ -613,6 +613,12 @@ function buildRepairInstruction(error, rawTools, rawToolChoice) {
     ].join('\n');
   }
 
+  const definitions = JSON.stringify(
+    tools.map(compactToolForPrompt),
+    null,
+    2,
+  ).slice(0, MAX_TOOL_PROMPT_CHARS);
+
   const allowedNames = tools.map((tool) => tool.function.name);
   const expected = choice.mode === 'specific'
     ? `Use exactly ${JSON.stringify(choice.name)}.`
@@ -626,6 +632,8 @@ function buildRepairInstruction(error, rawTools, rawToolChoice) {
     '{"tool_call":{"name":"exact_tool_name","arguments":{}}}',
     'The arguments object must satisfy the selected tool JSON Schema.',
     'Never invent a tool name. Keep arguments minimal.',
+    '',
+    `AVAILABLE_TOOLS=${definitions}`,
   ].join('\n');
 }
 
