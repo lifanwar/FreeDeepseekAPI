@@ -99,7 +99,7 @@ function isTruthy(value) { return typeof value === 'string' && ['1','true','yes'
 const sessions = new Map();  // keyed by agent ID (from `user` field)
 const MAX_HISTORY_LENGTH = 15;
 const MAX_HISTORY_CHARS = 10000;
-const MAX_MESSAGE_DEPTH = 100;  // auto-reset after this many messages
+const MAX_MESSAGE_DEPTH = 10;  // auto-reset after this many messages
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
 const MAX_SESSIONS = 10;
 
