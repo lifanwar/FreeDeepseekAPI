@@ -1149,7 +1149,7 @@ function formatMessages(messages, tools, model, toolChoice) {
         }
     }
     systemPrompt += teraxProvider.isTeraxModel(model)
-        ? teraxProvider.formatToolDefinitions(tools, toolChoice)
+        ? teraxProvider.formatToolDefinitions(tools, toolChoice, { messages })
         : formatToolDefinitions(tools);
 
     // Build full conversation history for DeepSeek's context
@@ -1531,7 +1531,7 @@ const server = http.createServer(async (req, res) => {
 
             const inspectRequestedToolCall = (text) => {
         if (teraxProvider.isTeraxModel(requestedModel)) {
-          return teraxProvider.inspectToolCall(text, tools, params.tool_choice);
+          return teraxProvider.inspectToolCall(text, tools, params.tool_choice, { messages });
         }
         return { found: false, call: parseToolCall(text), error: null };
       };
@@ -1551,7 +1551,7 @@ const server = http.createServer(async (req, res) => {
                 await new Promise(r => setTimeout(r, 1000));
                 const strictPrompt = fullPrompt + '\n\n' + (
         teraxProvider.isTeraxModel(requestedModel)
-          ? teraxProvider.buildRepairInstruction(toolInspection.error, tools, params.tool_choice)
+          ? teraxProvider.buildRepairInstruction(toolInspection.error, tools, params.tool_choice, { messages })
           : '[STRICT INSTRUCTION] The previous TOOL_CALL was malformed. Output ONLY: TOOL_CALL: <function_name>\narguments: <short JSON object>'
       );
       const { resp: retryResp2 } = await askDeepSeekStream(strictPrompt, agentId, requestedModel);
