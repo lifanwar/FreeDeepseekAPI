@@ -1346,12 +1346,6 @@ const server = http.createServer(async (req, res) => {
 
             const { prompt, systemPrompt } = formatMessages(messages, tools, requestedModel);
 
-            const { prompt, systemPrompt } = formatMessages(
-              messages,
-              tools,
-              requestedModel
-            );
-            
             const session = getOrCreateAgentSession(agentId);
             const isTerax = teraxProvider.isTeraxModel(requestedModel);
             
@@ -1373,7 +1367,6 @@ const server = http.createServer(async (req, res) => {
             
               historyPrefix += '[Continue from here]\n\n';
             }
-}
 
             const fullPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${historyPrefix}${prompt}`
