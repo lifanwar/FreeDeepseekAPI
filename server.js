@@ -20,6 +20,7 @@ const readline = require('readline');
 const { spawnSync } = require('child_process');
 
 const crypto = require('crypto');
+const teraxProvider = require('./provider/terax');
 
 const OPENAI_COMPAT_API_KEY = String(process.env.OPENAI_COMPAT_API_KEY || '').trim();
 
@@ -344,7 +345,13 @@ const MODEL_CONFIGS = {
         capabilities: { reasoning: false, web_search: true, files: true },
         supported: true,
     },
-    'deepseek-default-search': {
+    'deepseek-terax': {
+    model_type: 'default', thinking_enabled: false, search_enabled: true,
+    real_model: 'DeepSeek-V4-Flash non-thinking (DeepSeek Web “Быстрый” / default) + web search',
+    capabilities: { reasoning: false, web_search: true, files: true },
+    supported: true,
+  },
+  'deepseek-default-search': {
         model_type: 'default', thinking_enabled: false, search_enabled: true,
         real_model: 'DeepSeek-V4-Flash non-thinking (DeepSeek Web “Быстрый” / default) + web search',
         capabilities: { reasoning: false, web_search: true, files: true },
@@ -1082,7 +1089,7 @@ function sendOpenAIStream(res, openaiResp) {
     res.end();
 }
 
-function storeHistory(agentId, prompt, content, toolCall) {
+function storeHistory(agentId, prompt, content, toolCall, model = '') {
     const session = getOrCreateAgentSession(agentId);
     const assistantResponse = toolCall
         ? `TOOL_CALL: ${toolCall.name}\narguments: ${toolCall.arguments}`
@@ -1141,14 +1148,16 @@ function extractScreenshotPaths(messages) {
     return paths;
 }
 
-function formatMessages(messages, tools) {
+function formatMessages(messages, tools, model = 'deepseek-chat') {
     let systemPrompt = '';
     for (const msg of messages) {
         if (msg.role === 'system' && msg.content) {
             systemPrompt += msg.content + '\n';
         }
     }
-    systemPrompt += formatToolDefinitions(tools);
+    systemPrompt += teraxProvider.isTeraxModel(model)
+    ? teraxProvider.formatToolDefinitions(tools)
+    : formatToolDefinitions(tools);
 
     // Build full conversation history for DeepSeek's context
     let conversation = '';
@@ -1160,7 +1169,10 @@ function formatMessages(messages, tools) {
             if (msg.tool_calls && msg.tool_calls.length > 0) {
                 // This was a tool call response from a previous turn
                 for (const tc of msg.tool_calls) {
-                    conversation += `Assistant: TOOL_CALL: ${tc.function.name}\narguments: ${tc.function.arguments}\n\n`;
+                    const historyCall = { name: tc.function.name, arguments: tc.function.arguments };
+        conversation += teraxProvider.isTeraxModel(model)
+          ? `Assistant: ${teraxProvider.formatHistoricalToolCall(historyCall)}\n\n`
+          : `Assistant: TOOL_CALL: ${tc.function.name}\narguments: ${tc.function.arguments}\n\n`;
                 }
             } else if (msg.content) {
                 conversation += `Assistant: ${msg.content}\n\n`;
@@ -1332,7 +1344,7 @@ const server = http.createServer(async (req, res) => {
                 return;
             }
 
-            const { prompt, systemPrompt } = formatMessages(messages, tools);
+            const { prompt, systemPrompt } = formatMessages(messages, tools, requestedModel);
 
             const session = getOrCreateAgentSession(agentId);
 
@@ -1527,10 +1539,19 @@ const server = http.createServer(async (req, res) => {
                 }
             }
 
-            let toolCall = parseToolCall(fullContent);
+            let teraxParse = teraxProvider.isTeraxModel(requestedModel)
+
+
+              ? teraxProvider.parseToolCall(fullContent, tools)
+
+
+              : null;
+
+
+            let toolCall = teraxParse ? teraxParse.toolCall : parseToolCall(fullContent);
             
             // Retry if TOOL_CALL was found but JSON was truncated/invalid
-            if (!toolCall && /TOOL_CALL:\s*\w/i.test(fullContent)) {
+            if (!teraxProvider.isTeraxModel(requestedModel) && !toolCall && /TOOL_CALL:\s*\w/i.test(fullContent)) {
                 console.log(`${agentTag} TOOL_CALL detected but JSON invalid/truncated (${fullContent.length} chars). Retrying with stricter prompt...`);
                 session.id = null;
                 session.parentMessageId = null;
@@ -1555,6 +1576,112 @@ const server = http.createServer(async (req, res) => {
                 }
             }
             
+            if (teraxParse && teraxParse.error) {
+
+            
+              console.log(`${agentTag} Terax tool call rejected (${teraxParse.error.code}): ${teraxParse.error.message}`);
+
+            
+              session.id = null;
+
+            
+              session.parentMessageId = null;
+
+            
+              session.createdAt = null;
+
+            
+              session.messageCount = 0;
+
+            
+              await new Promise(r => setTimeout(r, 1000));
+
+
+            
+              const repairPrompt = fullPrompt + '\n\n' + teraxProvider.formatRepairInstruction(teraxParse.error);
+
+            
+              const { resp: teraxRetryResp } = await askDeepSeekStream(repairPrompt, agentId, requestedModel);
+
+            
+              const teraxRetryResult = await readDeepSeekResponse(teraxRetryResp.body);
+
+            
+              const teraxRetryContent = teraxRetryResult && teraxRetryResult.content
+
+            
+                ? sanitizeContent(teraxRetryResult.content)
+
+            
+                : '';
+
+
+            
+              if (teraxRetryContent.trim()) {
+
+            
+                fullContent = teraxRetryContent;
+
+            
+                reasoningContent = teraxRetryResult.reasoningContent
+
+            
+                  ? sanitizeContent(teraxRetryResult.reasoningContent)
+
+            
+                  : '';
+
+            
+                teraxParse = teraxProvider.parseToolCall(teraxRetryContent, tools);
+
+            
+                toolCall = teraxParse.toolCall;
+
+            
+              }
+
+
+            
+              if (teraxParse.error) {
+
+            
+                res.writeHead(422, { 'Content-Type': 'application/json' });
+
+            
+                res.end(JSON.stringify({
+
+            
+                  error: {
+
+            
+                    message: teraxParse.error.message,
+
+            
+                    type: 'invalid_terax_tool_call',
+
+            
+                    code: teraxParse.error.code,
+
+            
+                    model: requestedModel,
+
+            
+                  },
+
+            
+                }));
+
+            
+                return;
+
+            
+              }
+
+            
+            }
+
+
+            
             // Check if any tool results in the current conversation contained a screenshot path.
             // If so, and the response doesn't already have MEDIA:, inject it so the gateway
             // delivers the file to Telegram.
@@ -1566,7 +1693,7 @@ const server = http.createServer(async (req, res) => {
                 }
             }
 
-            storeHistory(agentId, prompt, fullContent, toolCall);
+            storeHistory(agentId, prompt, fullContent, toolCall, requestedModel);
 
             const openaiResponse = toolCall
                 ? buildToolCallResponse(toolCall, requestedModel, fullPrompt, reasoningContent)
