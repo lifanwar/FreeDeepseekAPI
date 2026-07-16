@@ -1346,17 +1346,34 @@ const server = http.createServer(async (req, res) => {
 
             const { prompt, systemPrompt } = formatMessages(messages, tools, requestedModel);
 
+            const { prompt, systemPrompt } = formatMessages(
+              messages,
+              tools,
+              requestedModel
+            );
+            
             const session = getOrCreateAgentSession(agentId);
-
-            // Build history prefix if starting fresh
-            let historyPrefix = '';
-            if (!session.id && session.history.length > 0) {
-                historyPrefix = '[Previous conversation]\n';
-                for (const exchange of session.history) {
-                    historyPrefix += `User: ${exchange.user}\nAssistant: ${exchange.assistant}\n\n`;
-                }
-                historyPrefix += '[Continue from here]\n\n';
+            const isTerax = teraxProvider.isTeraxModel(requestedModel);
+            
+            // Terax uses the OpenAI-compatible messages request as its only history.
+            if (isTerax && session.history.length > 0) {
+              session.history.length = 0;
             }
+            
+            let historyPrefix = '';
+            
+            if (!isTerax && !session.id && session.history.length > 0) {
+              historyPrefix = '[Previous conversation]\n';
+            
+              for (const exchange of session.history) {
+                historyPrefix +=
+                  `User: ${exchange.user}\n` +
+                  `Assistant: ${exchange.assistant}\n\n`;
+              }
+            
+              historyPrefix += '[Continue from here]\n\n';
+            }
+}
 
             const fullPrompt = systemPrompt
                 ? `${systemPrompt}\n\n${historyPrefix}${prompt}`
@@ -1693,7 +1710,9 @@ const server = http.createServer(async (req, res) => {
                 }
             }
 
-            storeHistory(agentId, prompt, fullContent, toolCall, requestedModel);
+            if (!isTerax) {
+              storeHistory(agentId, prompt, fullContent, toolCall, requestedModel);
+            }
 
             const openaiResponse = toolCall
                 ? buildToolCallResponse(toolCall, requestedModel, fullPrompt, reasoningContent)
