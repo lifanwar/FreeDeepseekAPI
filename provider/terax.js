@@ -2,6 +2,7 @@
 
 const MODEL_ID = 'deepseek-terax';
 const CALL_EXAMPLE = '{"tool_call":{"name":"<exact_tool_name>","arguments":{}}}';
+const RAW_TOOL_LOG_LIMIT = 20_000;
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -64,6 +65,62 @@ function formatHistoricalToolCall(toolCall) {
 
 function invalid(code, message) {
   return { toolCall: null, error: { code, message } };
+}
+
+function rejectToolCall(code, message, raw, tools) {
+  const originalRaw = String(raw || '').trim();
+  const normalizedRaw = normalizeTeraxToolText(originalRaw);
+
+  if (process.env.TERAX_LOG_REJECTED_TOOLS !== '0') {
+    let parsed = null;
+
+    try {
+      parsed = JSON.parse(normalizedRaw);
+    } catch (_) {
+      // Tetap log raw response saat JSON benar-benar rusak.
+    }
+
+    const call =
+      isPlainObject(parsed) && isPlainObject(parsed.tool_call)
+        ? parsed.tool_call
+        : null;
+
+    const truncate = value => {
+      const text = String(value || '');
+
+      return text.length > RAW_TOOL_LOG_LIMIT
+        ? `${text.slice(0, RAW_TOOL_LOG_LIMIT)}...[truncated ${
+            text.length - RAW_TOOL_LOG_LIMIT
+          } chars]`
+        : text;
+    };
+
+    const logEntry = {
+      code,
+      message,
+      attemptedTool:
+        call && typeof call.name === 'string'
+          ? call.name
+          : null,
+      attemptedArguments:
+        call && Object.hasOwn(call, 'arguments')
+          ? call.arguments
+          : null,
+      allowedTools: toolFunctions(tools).map(tool => tool.name),
+      raw: truncate(originalRaw),
+    };
+
+    if (normalizedRaw !== originalRaw) {
+      logEntry.normalizedRaw = truncate(normalizedRaw);
+    }
+
+    console.error(
+      '[TERAX TOOL CALL REJECTED]',
+      JSON.stringify(logEntry, null, 2)
+    );
+  }
+
+  return invalid(code, message);
 }
 
 function looksLikeToolAttempt(text) {
@@ -228,54 +285,170 @@ function validateSchema(value, schema, path = '$', root = schema, depth = 0) {
   return null;
 }
 
-function parseToolCall(text, tools) {
-  if (!text || typeof text !== 'string') return { toolCall: null, error: null };
-  const raw = text.trim();
-  if (!raw) return { toolCall: null, error: null };
+function normalizeTeraxToolText(text) {
+  let normalized = String(text || '').trim();
+  let previous;
 
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch (_) {
-    return looksLikeToolAttempt(raw)
-      ? invalid('invalid_terax_json', `Tool calls must be exactly ${CALL_EXAMPLE} with valid JSON and no surrounding text.`)
-      : { toolCall: null, error: null };
+  // Hanya hapus wrapper yang dikenal dari terax.app.
+  // Teks/prosa sembarang tetap akan ditolak.
+  do {
+    previous = normalized;
+
+    normalized = normalized
+      .replace(/^<env>\s*[\s\S]*?<\/env>\s*/i, '')
+      .trim();
+
+    const fencedJson = normalized.match(
+      /^```(?:json)?\s*([\s\S]*?)\s*```$/i
+    );
+
+    if (fencedJson) {
+      normalized = fencedJson[1].trim();
+    }
+  } while (normalized !== previous);
+
+  return normalized;
+}
+
+function parseToolCall(text, tools) {
+  if (!text || typeof text !== 'string') {
+    return {
+      toolCall: null,
+      error: null,
+    };
   }
 
-  if (!isPlainObject(payload) || !Object.hasOwn(payload, 'tool_call')) {
+  const raw = text.trim();
+
+  if (!raw) {
+    return {
+      toolCall: null,
+      error: null,
+    };
+  }
+
+  // terax.app dapat menambahkan <env> atau Markdown JSON fence.
+  const normalizedRaw = normalizeTeraxToolText(raw);
+
+  let payload;
+
+  try {
+    payload = JSON.parse(normalizedRaw);
+  } catch (_) {
+    return looksLikeToolAttempt(raw)
+      ? rejectToolCall(
+          'invalid_terax_json',
+          `Tool call must contain one valid JSON object matching ${CALL_EXAMPLE}. Terax <env> prefixes and full JSON code fences are accepted.`,
+          raw,
+          tools
+        )
+      : {
+          toolCall: null,
+          error: null,
+        };
+  }
+
+  if (
+    !isPlainObject(payload) ||
+    !Object.hasOwn(payload, 'tool_call')
+  ) {
     return hasToolLikeShape(payload)
-      ? invalid('invalid_terax_wrapper', `Use only the exact wrapper ${CALL_EXAMPLE}.`)
-      : { toolCall: null, error: null };
+      ? rejectToolCall(
+          'invalid_terax_wrapper',
+          `Use the tool-call shape ${CALL_EXAMPLE}.`,
+          raw,
+          tools
+        )
+      : {
+          toolCall: null,
+          error: null,
+        };
   }
 
   if (Object.keys(payload).length !== 1) {
-    return invalid('invalid_terax_wrapper', 'The top-level object may contain only tool_call.');
+    return rejectToolCall(
+      'invalid_terax_wrapper',
+      'The top-level object may contain only tool_call.',
+      raw,
+      tools
+    );
   }
 
   const call = payload.tool_call;
-  if (!isPlainObject(call) || Object.keys(call).length !== 2 || !Object.hasOwn(call, 'name') || !Object.hasOwn(call, 'arguments')) {
-    return invalid('invalid_terax_call', 'tool_call must contain exactly name and arguments.');
+
+  if (
+    !isPlainObject(call) ||
+    Object.keys(call).length !== 2 ||
+    !Object.hasOwn(call, 'name') ||
+    !Object.hasOwn(call, 'arguments')
+  ) {
+    return rejectToolCall(
+      'invalid_terax_call',
+      'tool_call must contain exactly name and arguments.',
+      raw,
+      tools
+    );
   }
-  if (typeof call.name !== 'string' || call.name.length === 0) {
-    return invalid('invalid_terax_name', 'tool_call.name must be a non-empty string.');
+
+  if (
+    typeof call.name !== 'string' ||
+    call.name.length === 0
+  ) {
+    return rejectToolCall(
+      'invalid_terax_name',
+      'tool_call.name must be a non-empty string.',
+      raw,
+      tools
+    );
   }
+
   if (!isPlainObject(call.arguments)) {
-    return invalid('invalid_terax_arguments', 'tool_call.arguments must be a JSON object.');
+    return rejectToolCall(
+      'invalid_terax_arguments',
+      'tool_call.arguments must be a JSON object.',
+      raw,
+      tools
+    );
   }
 
   const definitions = toolFunctions(tools);
-  const definition = definitions.find(tool => tool.name === call.name);
+
+  const definition = definitions.find(
+    tool => tool.name === call.name
+  );
+
   if (!definition) {
-    return invalid('unknown_terax_tool', `Unknown tool ${JSON.stringify(call.name)}. Allowed tools: ${definitions.map(tool => tool.name).join(', ') || '(none)'}.`);
+    return rejectToolCall(
+      'unknown_terax_tool',
+      `Unknown tool ${JSON.stringify(
+        call.name
+      )}. Allowed tools: ${
+        definitions.map(tool => tool.name).join(', ') || '(none)'
+      }.`,
+      raw,
+      tools
+    );
   }
 
-  const schemaError = validateSchema(call.arguments, definition.parameters);
+  const schemaError = validateSchema(
+    call.arguments,
+    definition.parameters
+  );
+
   if (schemaError) {
-    return invalid('invalid_terax_arguments', `${call.name} arguments rejected: ${schemaError}.`);
+    return rejectToolCall(
+      'invalid_terax_arguments',
+      `${call.name} arguments rejected: ${schemaError}.`,
+      raw,
+      tools
+    );
   }
 
   return {
-    toolCall: { name: call.name, arguments: JSON.stringify(call.arguments) },
+    toolCall: {
+      name: call.name,
+      arguments: JSON.stringify(call.arguments),
+    },
     error: null,
   };
 }
