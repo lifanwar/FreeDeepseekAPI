@@ -285,12 +285,164 @@ function validateSchema(value, schema, path = '$', root = schema, depth = 0) {
   return null;
 }
 
+function extractBalancedJsonObject(text, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth++;
+    } else if (char === '}') {
+      depth--;
+
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+
+      if (depth < 0) {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractTrailingTeraxJson(text) {
+  // ponytail: O(n²) worst case, aman untuk respons model yang pendek.
+  // Ganti dengan one-pass scanner jika output besar mulai menjadi bottleneck.
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue;
+
+    const candidate = extractBalancedJsonObject(text, i);
+
+    if (!candidate) continue;
+
+    const suffix = text
+      .slice(i + candidate.length)
+      .trim();
+
+    /*
+     * Leading prose diperbolehkan, tetapi setelah JSON hanya boleh ada
+     * whitespace atau penutup Markdown fence.
+     *
+     * Ini mencegah JSON contoh di tengah penjelasan dianggap sebagai
+     * tool call sungguhan.
+     */
+    if (suffix && !/^```\s*$/.test(suffix)) {
+      continue;
+    }
+
+    try {
+      const payload = JSON.parse(candidate);
+
+      if (
+        isPlainObject(payload) &&
+        Object.hasOwn(payload, 'tool_call')
+      ) {
+        return candidate;
+      }
+    } catch (_) {
+      // Kandidat bukan JSON valid. Lanjut cari objek berikutnya.
+    }
+  }
+
+  return null;
+}
+
+function repairSingleMissingClosingBrace(text) {
+  const source = String(text || '').trim();
+
+  // Hanya repair respons yang memang dimulai sebagai JSON object.
+  if (!source.startsWith('{')) return null;
+
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+
+  for (const char of source) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      stack.push('}');
+      continue;
+    }
+
+    if (char === '[') {
+      stack.push(']');
+      continue;
+    }
+
+    if (char === '}' || char === ']') {
+      if (stack.pop() !== char) return null;
+    }
+  }
+
+  /*
+   * Jangan repair string yang terpotong, delimiter yang kacau,
+   * atau lebih dari satu delimiter yang hilang.
+   */
+  if (
+    inString ||
+    escaped ||
+    stack.length !== 1 ||
+    stack[0] !== '}'
+  ) {
+    return null;
+  }
+
+  const repaired = `${source}}`;
+
+  try {
+    const payload = JSON.parse(repaired);
+
+    return (
+      isPlainObject(payload) &&
+      isPlainObject(payload.tool_call)
+    )
+      ? repaired
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function normalizeTeraxToolText(text) {
   let normalized = String(text || '').trim();
   let previous;
 
-  // Hanya hapus wrapper yang dikenal dari terax.app.
-  // Teks/prosa sembarang tetap akan ditolak.
   do {
     previous = normalized;
 
@@ -307,7 +459,17 @@ function normalizeTeraxToolText(text) {
     }
   } while (normalized !== previous);
 
-  return normalized;
+  /*
+   * Prioritas:
+   * 1. Prose + JSON final yang lengkap.
+   * 2. JSON murni/full fence yang hanya kehilangan satu root `}`.
+   * 3. Selain itu biarkan JSON.parse menolaknya.
+   */
+  return (
+    extractTrailingTeraxJson(normalized) ||
+    repairSingleMissingClosingBrace(normalized) ||
+    normalized
+  );
 }
 
 function parseToolCall(text, tools) {
